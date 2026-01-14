@@ -11,7 +11,7 @@ use crate::error::WebSocketError;
 #[derive(Debug)]
 pub enum MaybeTlsStream {
     Plain(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 fn build_tls_connector() -> Result<TlsConnector, WebSocketError> {
@@ -39,7 +39,7 @@ impl MaybeTlsStream {
                     .map_err(|_| WebSocketError::InvalidUrl("invalid domain".to_string()))?
                     .to_owned();
                 let tls_stream = tls_connector.connect(dnsname, stream).await?;
-                Ok(MaybeTlsStream::Tls(tls_stream))
+                Ok(MaybeTlsStream::Tls(Box::new(tls_stream)))
             }
             _ => Err(WebSocketError::InvalidUrl("unsupported scheme".to_string())),
         }

@@ -27,3 +27,7 @@ rustls = { version = "0.23", features = ["std"] }
 webpki-roots = "1"
 rustls-pki-types = "1"
 url = "2.5"
+
+[[example]]
+name = "client"
+path = "examples/client.rs"

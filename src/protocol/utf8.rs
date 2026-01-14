@@ -148,16 +148,28 @@ impl TryFrom<Vec<u8>> for Utf8Bytes {
     }
 }
 
+pub(crate) fn concat_bytes(bytes_list: Vec<Bytes>) -> Bytes {
+    match bytes_list.len() {
+        0 => Bytes::new(),
+        1 => bytes_list.into_iter().next().unwrap(),
+        _ => {
+            let size = bytes_list.iter().map(|b| b.len()).sum();
+            let mut buf = BytesMut::with_capacity(size);
+            for b in bytes_list {
+                buf.extend_from_slice(&b);
+            }
+            buf.freeze()
+        }
+    }
+}
+
 impl TryFrom<Vec<Bytes>> for Utf8Bytes {
     type Error = str::Utf8Error;
 
     #[inline]
     fn try_from(v: Vec<Bytes>) -> Result<Self, Self::Error> {
-        let bytes = v.into_iter().fold(BytesMut::new(), |mut acc, b| {
-            acc.extend_from_slice(&b);
-            acc
-        });
-        bytes.freeze().try_into()
+        let bytes = concat_bytes(v);
+        bytes.try_into()
     }
 }
 

@@ -9,7 +9,7 @@ use std::{
     string::String,
 };
 
-use crate::{error::WebSocketError, frame::utf8::Utf8Bytes};
+use crate::{error::WebSocketError, protocol::utf8::Utf8Bytes};
 
 use super::{
     coding::{CloseCode, Control, Data, OpCode},

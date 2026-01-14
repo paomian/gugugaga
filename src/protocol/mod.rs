@@ -2,22 +2,22 @@ use crate::error::WebSocketError;
 use bytes::{Buf, BufMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::frame::frame::FrameHeader;
+use crate::protocol::frame::FrameHeader;
 
 pub mod coding;
 pub mod frame;
 pub mod mask;
 pub mod utf8;
 
-pub enum FrameDecoderState {
-    ReadingHeader,
-    ReadingExtendedPayloadLength,
-    ReadingMaskingKey,
-    ReadingPayload,
+pub enum FrameDecoderReadingState {
+    Header,
+    ExtendedPayloadLength,
+    MaskingKey,
+    Payload,
 }
 
 pub struct FrameDecoder {
-    state: FrameDecoderState,
+    state: FrameDecoderReadingState,
     is_final: bool,
     rsv1: bool,
     rsv2: bool,
@@ -31,8 +31,8 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
-    fn reset(&mut self) {
-        self.state = FrameDecoderState::ReadingHeader;
+    pub fn reset(&mut self) {
+        self.state = FrameDecoderReadingState::Header;
         self.is_final = false;
         self.rsv1 = false;
         self.rsv2 = false;
@@ -49,7 +49,7 @@ impl FrameDecoder {
 impl Default for FrameDecoder {
     fn default() -> Self {
         Self {
-            state: FrameDecoderState::ReadingHeader,
+            state: FrameDecoderReadingState::Header,
             is_final: false,
             rsv1: false,
             rsv2: false,
@@ -71,7 +71,7 @@ impl Decoder for FrameDecoder {
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         loop {
             match self.state {
-                FrameDecoderState::ReadingHeader => {
+                FrameDecoderReadingState::Header => {
                     if src.remaining() < 2 {
                         return Ok(None);
                     }
@@ -93,7 +93,7 @@ impl Decoder for FrameDecoder {
                     };
                     src.advance(2);
 
-                    self.state = FrameDecoderState::ReadingExtendedPayloadLength;
+                    self.state = FrameDecoderReadingState::ExtendedPayloadLength;
                     self.is_final = fin;
                     self.rsv1 = rsv1;
                     self.rsv2 = rsv2;
@@ -103,7 +103,7 @@ impl Decoder for FrameDecoder {
                     self.extra = extra;
                     self.masked = masked;
                 }
-                FrameDecoderState::ReadingExtendedPayloadLength => {
+                FrameDecoderReadingState::ExtendedPayloadLength => {
                     let needed = self.extra;
                     if src.remaining() < needed {
                         return Ok(None);
@@ -119,10 +119,10 @@ impl Decoder for FrameDecoder {
                         }
                         _ => self.length_code as usize,
                     };
-                    self.state = FrameDecoderState::ReadingMaskingKey;
+                    self.state = FrameDecoderReadingState::MaskingKey;
                     self.payload_len = Some(payload_len);
                 }
-                FrameDecoderState::ReadingMaskingKey => {
+                FrameDecoderReadingState::MaskingKey => {
                     let masking_key = if self.masked {
                         if src.remaining() < 4 {
                             return Ok(None);
@@ -132,10 +132,10 @@ impl Decoder for FrameDecoder {
                     } else {
                         None
                     };
-                    self.state = FrameDecoderState::ReadingPayload;
+                    self.state = FrameDecoderReadingState::Payload;
                     self.masking_key = masking_key;
                 }
-                FrameDecoderState::ReadingPayload => {
+                FrameDecoderReadingState::Payload => {
                     let payload_len = self.payload_len.unwrap_or(0);
                     if src.remaining() < payload_len {
                         return Ok(None);
@@ -156,7 +156,7 @@ impl Decoder for FrameDecoder {
                         payload.into(),
                     );
                     // Reset state for next frame
-                    self.state = FrameDecoderState::ReadingHeader;
+                    self.state = FrameDecoderReadingState::Header;
                     return Ok(Some(frame));
                 }
             }
@@ -164,7 +164,6 @@ impl Decoder for FrameDecoder {
     }
 }
 
-#[derive(Default)]
 pub struct FrameEncoder;
 
 impl Encoder<frame::Frame> for FrameEncoder {

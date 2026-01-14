@@ -50,6 +50,8 @@ pub enum WebSocketError {
     HyperHttp(#[from] hyper::http::Error),
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+    #[error("masked frame received from server")]
+    MaskedFrameFromServer,
 }
 
 pub type Result<T> = std::result::Result<T, WebSocketError>;

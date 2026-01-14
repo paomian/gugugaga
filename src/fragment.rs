@@ -80,6 +80,9 @@ where
                 Some(Ok(frame)) => {
                     let opcode = frame.header().opcode;
                     let fin = frame.header().is_final;
+                    if frame.is_masked() {
+                        return Poll::Ready(Some(Err(WebSocketError::MaskedFrameFromServer)));
+                    }
 
                     match opcode {
                         // 处理控制帧：它们可以穿插在分片中

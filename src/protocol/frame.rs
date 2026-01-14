@@ -66,6 +66,7 @@ impl Default for FrameHeader {
 impl FrameHeader {
     /// > The longest possible header is 14 bytes, which would represent a message sent from
     /// > the client to the server with a payload greater than 64KB.
+    #[allow(dead_code)]
     pub(crate) const MAX_SIZE: usize = 14;
 
     /// Parse a header from an input stream.
@@ -374,6 +375,7 @@ impl Frame {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn format_into_buf(mut self, buf: &mut Vec<u8>) -> Result<()> {
         self.header.format(self.payload.len() as u64, buf)?;
 

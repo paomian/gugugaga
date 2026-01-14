@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = Arc::new(AtomicU64::new(0));
     let send_cnt = Arc::new(AtomicU64::new(0));
 
-    let message_20b = Bytes::from_static("xxxxxxxxxxxxxxxxxxxx".as_bytes());
+    // let message_20b = Bytes::from_static("xxxxxxxxxxxxxxxxxxxx".as_bytes());
     let message_16384b = Bytes::from_static("x".repeat(16384).leak().as_bytes());
     // 统计任务
     {
@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cnt = cnt.clone();
         let bytes = bytes.clone();
         let send_cnt = send_cnt.clone();
-        let message_20b = message_20b.clone();
+        // let message_20b = message_20b.clone();
         let message_16384b = message_16384b.clone();
         tokio::spawn({
             async move {

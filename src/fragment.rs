@@ -276,3 +276,42 @@ where
         self.project().inner.poll_close(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn test_small_message() {
+        let msg = Message::Text("hello".into());
+        let frames: Vec<Frame> = msg.into();
+        assert_eq!(frames.len(), 1);
+        let frame = &frames[0];
+        assert_eq!(frame.header().opcode, OpCode::Data(Data::Text));
+        assert_eq!(frame.payload(), Bytes::from("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_large_message() {
+        // more than 512kb
+        let large_data = vec![0u8; 600 * 1024];
+        let msg = Message::Binary(Bytes::from(large_data.clone()));
+        let frames: Vec<Frame> = msg.into();
+        assert!(frames.len() > 1);
+        let mut reassembled = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            if i == 0 {
+                assert!(!frame.header().is_final);
+                assert_eq!(frame.header().opcode, OpCode::Data(Data::Binary));
+            } else if i == frames.len() - 1 {
+                assert!(frame.header().is_final);
+                assert_eq!(frame.header().opcode, OpCode::Data(Data::Continue));
+            } else {
+                assert!(!frame.header().is_final);
+                assert_eq!(frame.header().opcode, OpCode::Data(Data::Continue));
+            }
+
+            reassembled.extend_from_slice(&frame.payload());
+        }
+        assert_eq!(reassembled, large_data);
+    }
+}

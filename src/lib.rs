@@ -13,8 +13,10 @@ use hyper::header::{CONNECTION, UPGRADE};
 use hyper::upgrade::Upgraded;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
+use tokio::net::TcpStream;
 
 use std::pin::Pin;
+use std::str::FromStr;
 
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -30,6 +32,7 @@ pub use error::Result;
 pub use error::WebSocketError;
 pub use fragment::Message;
 pub use protocol::frame::Frame;
+pub use proxy::{Proxy, open_tunnel};
 
 #[derive(Debug)]
 pub struct WebSocketClient<S>
@@ -115,17 +118,32 @@ where
     }
 }
 
-pub async fn connect(url: &str) -> Result<(TokioIo<Upgraded>, Response<Incoming>)> {
+pub async fn connect(
+    url: &str,
+    proxy: Option<Proxy>,
+) -> Result<(TokioIo<Upgraded>, Response<Incoming>)> {
     let url = Url::parse(url)?;
-    let domain = url
+    let mut domain = url
         .domain()
         .or(url.host_str())
         .ok_or(WebSocketError::InvalidUrl("missing domain".to_string()))?;
+    if domain.starts_with('[') && domain.ends_with(']') {
+        domain = &domain[1..domain.len() - 1];
+    }
     let port = url
         .port_or_known_default()
         .ok_or(WebSocketError::InvalidUrl("missing port".to_string()))?;
     let req = req(domain, port, url.scheme(), url.path())?;
-    let socket = MaybeTlsStream::new(domain, port, url.scheme()).await?;
+    let socket = match proxy {
+        Some(proxy) => {
+            let stream = open_tunnel(domain, port, proxy, true).await?;
+            MaybeTlsStream::new(stream, url.scheme(), domain).await?
+        }
+        None => {
+            let stream = Box::new(TcpStream::connect((domain, port)).await?) as _;
+            MaybeTlsStream::new(stream, url.scheme(), domain).await?
+        }
+    };
     handshake::client(&TokioExecutor, req, socket).await
 }
 
@@ -135,7 +153,7 @@ pub async fn frame_connect(
     FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>,
     FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>,
 )> {
-    let (stream, _) = connect(url).await?;
+    let (stream, _) = connect(url, None).await?;
     let (r, w) = tokio::io::split(stream);
     let decoder = FrameDecoder::default();
     let framed_read = FramedRead::new(r, decoder);
@@ -152,6 +170,26 @@ pub async fn fragment_connect(
 )> {
     let (framed_read, framed_write) = frame_connect(url).await?;
 
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
+    let fragmented_read = FragmentReader::new(framed_read, control_tx);
+    let fragmented_write = FragmentWriter::new(framed_write, control_rx);
+    Ok((fragmented_read, fragmented_write))
+}
+
+pub async fn fragment_connect_with_proxy(
+    url: &str,
+    proxy_url: &str,
+) -> Result<(
+    FragmentReader<FramedRead<tokio::io::ReadHalf<TokioIo<Upgraded>>, FrameDecoder>>,
+    FragmentWriter<FramedWrite<tokio::io::WriteHalf<TokioIo<Upgraded>>, FrameEncoder>>,
+)> {
+    let proxy = Proxy::from_str(proxy_url)?;
+    let (stream, _) = connect(url, Some(proxy)).await?;
+    let (r, w) = tokio::io::split(stream);
+    let decoder = FrameDecoder::default();
+    let framed_read = FramedRead::new(r, decoder);
+    let encoder = FrameEncoder;
+    let framed_write = tokio_util::codec::FramedWrite::new(w, encoder);
     let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
     let fragmented_read = FragmentReader::new(framed_read, control_tx);
     let fragmented_write = FragmentWriter::new(framed_write, control_rx);

@@ -31,3 +31,7 @@ url = "2.5"
 [[example]]
 name = "client"
 path = "examples/client.rs"
+
+[[example]]
+name = "client_with_proxy"
+path = "examples/client_with_proxy.rs"

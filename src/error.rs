@@ -8,6 +8,16 @@ pub enum WebSocketError {
     InvalidScheme(String),
     #[error("invalid dns name: {0}")]
     InvalidDnsName(String),
+    #[error("proxy response too large")]
+    ProxyResponseTooLarge,
+    #[error("proxy unexpected eof")]
+    ProxyUnexpectedEof,
+    #[error("proxy status code: {0}")]
+    ProxyStatusCode(String),
+    #[error("invalid dns name error: {0}")]
+    InvalidDnsNameError(#[from] rustls_pki_types::InvalidDnsNameError),
+    #[error("no host name in url")]
+    NoHostName,
     #[error("handshake failed: {0}")]
     Handshake(String),
     #[error("io error: {0}")]

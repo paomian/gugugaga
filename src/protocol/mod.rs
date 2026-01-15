@@ -175,3 +175,35 @@ impl Encoder<frame::Frame> for FrameEncoder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_frame_encoder_decoder() {
+        let mut encoder = FrameEncoder;
+        let mut decoder = FrameDecoder::default();
+
+        let original_payload = b"Hello, WebSocket!".to_vec();
+        let frame = frame::Frame::from_payload(
+            FrameHeader {
+                is_final: true,
+                rsv1: false,
+                rsv2: false,
+                rsv3: false,
+                opcode: coding::OpCode::Data(coding::Data::Text),
+                mask: None,
+            },
+            Bytes::from(original_payload.clone()),
+        );
+
+        let mut buf = bytes::BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let decoded_frame = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded_frame.payload(), &original_payload[..]);
+    }
+}

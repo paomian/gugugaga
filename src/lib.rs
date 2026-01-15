@@ -7,6 +7,7 @@ mod stream;
 
 use bytes::Bytes;
 
+use futures_util::{Sink, Stream};
 use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::header::{CONNECTION, UPGRADE};
@@ -149,49 +150,138 @@ pub async fn connect(
 
 pub async fn frame_connect(
     url: &str,
+    proxy: Option<Proxy>,
 ) -> Result<(
     FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>,
     FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>,
+    Response<Incoming>,
 )> {
-    let (stream, _) = connect(url, None).await?;
+    let (stream, response) = connect(url, proxy).await?;
     let (r, w) = tokio::io::split(stream);
     let decoder = FrameDecoder::default();
     let framed_read = FramedRead::new(r, decoder);
     let encoder = FrameEncoder;
     let framed_write = tokio_util::codec::FramedWrite::new(w, encoder);
-    Ok((framed_read, framed_write))
+    Ok((framed_read, framed_write, response))
 }
 
 pub async fn fragment_connect(
     url: &str,
-) -> Result<(
-    FragmentReader<FramedRead<tokio::io::ReadHalf<TokioIo<Upgraded>>, FrameDecoder>>,
-    FragmentWriter<FramedWrite<tokio::io::WriteHalf<TokioIo<Upgraded>>, FrameEncoder>>,
-)> {
-    let (framed_read, framed_write) = frame_connect(url).await?;
+    proxy: Option<Proxy>,
+) -> Result<(ReadHalfStream, WriteHalfSink, Response<Incoming>)> {
+    let (framed_read, framed_write, response) = frame_connect(url, proxy).await?;
 
     let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
     let fragmented_read = FragmentReader::new(framed_read, control_tx);
     let fragmented_write = FragmentWriter::new(framed_write, control_rx);
-    Ok((fragmented_read, fragmented_write))
+    Ok((fragmented_read.into(), fragmented_write.into(), response))
 }
 
 pub async fn fragment_connect_with_proxy(
     url: &str,
     proxy_url: &str,
-) -> Result<(
-    FragmentReader<FramedRead<tokio::io::ReadHalf<TokioIo<Upgraded>>, FrameDecoder>>,
-    FragmentWriter<FramedWrite<tokio::io::WriteHalf<TokioIo<Upgraded>>, FrameEncoder>>,
-)> {
+) -> Result<(ReadHalfStream, WriteHalfSink, Response<Incoming>)> {
     let proxy = Proxy::from_str(proxy_url)?;
-    let (stream, _) = connect(url, Some(proxy)).await?;
-    let (r, w) = tokio::io::split(stream);
-    let decoder = FrameDecoder::default();
-    let framed_read = FramedRead::new(r, decoder);
-    let encoder = FrameEncoder;
-    let framed_write = tokio_util::codec::FramedWrite::new(w, encoder);
+    let (framed_read, framed_write, response) = frame_connect(url, Some(proxy)).await?;
     let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
     let fragmented_read = FragmentReader::new(framed_read, control_tx);
     let fragmented_write = FragmentWriter::new(framed_write, control_rx);
-    Ok((fragmented_read, fragmented_write))
+    Ok((fragmented_read.into(), fragmented_write.into(), response))
+}
+
+pub struct WriteHalfSink {
+    writer: FragmentWriter<FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>>,
+}
+impl WriteHalfSink {
+    pub fn new(
+        writer: FragmentWriter<FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>>,
+    ) -> Self {
+        WriteHalfSink { writer }
+    }
+
+    pub fn into_inner(
+        self,
+    ) -> FragmentWriter<FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>> {
+        self.writer
+    }
+}
+impl From<FragmentWriter<FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>>>
+    for WriteHalfSink
+{
+    fn from(
+        writer: FragmentWriter<FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>>,
+    ) -> Self {
+        WriteHalfSink { writer }
+    }
+}
+
+impl Sink<Message> for WriteHalfSink {
+    type Error = WebSocketError;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.writer).poll_ready(cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Message) -> Result<()> {
+        let this = self.get_mut();
+        Pin::new(&mut this.writer).start_send(item)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.writer).poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.writer).poll_close(cx)
+    }
+}
+
+pub struct ReadHalfStream {
+    reader: FragmentReader<FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>>,
+}
+
+impl ReadHalfStream {
+    pub fn new(
+        reader: FragmentReader<FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>>,
+    ) -> Self {
+        ReadHalfStream { reader }
+    }
+
+    pub fn into_inner(
+        self,
+    ) -> FragmentReader<FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>> {
+        self.reader
+    }
+}
+
+impl Stream for ReadHalfStream {
+    type Item = Result<Message>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.reader).poll_next(cx)
+    }
+}
+
+impl From<FragmentReader<FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>>>
+    for ReadHalfStream
+{
+    fn from(reader: FragmentReader<FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>>) -> Self {
+        ReadHalfStream { reader }
+    }
 }

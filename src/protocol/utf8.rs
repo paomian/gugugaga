@@ -1,6 +1,6 @@
 use bytes::{Bytes, BytesMut};
 use core::str;
-use std::fmt::Display;
+use std::{collections::VecDeque, fmt::Display};
 
 /// Utf8 payload.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -148,7 +148,7 @@ impl TryFrom<Vec<u8>> for Utf8Bytes {
     }
 }
 
-pub(crate) fn concat_bytes(bytes_list: Vec<Bytes>) -> Bytes {
+pub(crate) fn concat_bytes(bytes_list: VecDeque<Bytes>) -> Bytes {
     match bytes_list.len() {
         0 => Bytes::new(),
         1 => bytes_list.into_iter().next().unwrap(),
@@ -163,11 +163,11 @@ pub(crate) fn concat_bytes(bytes_list: Vec<Bytes>) -> Bytes {
     }
 }
 
-impl TryFrom<Vec<Bytes>> for Utf8Bytes {
+impl TryFrom<VecDeque<Bytes>> for Utf8Bytes {
     type Error = str::Utf8Error;
 
     #[inline]
-    fn try_from(v: Vec<Bytes>) -> Result<Self, Self::Error> {
+    fn try_from(v: VecDeque<Bytes>) -> Result<Self, Self::Error> {
         let bytes = concat_bytes(v);
         bytes.try_into()
     }

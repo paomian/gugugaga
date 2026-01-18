@@ -7,6 +7,7 @@ mod stream;
 
 use bytes::Bytes;
 
+use futures_util::future::Either;
 use futures_util::{Sink, Stream};
 use http_body_util::Empty;
 use hyper::body::Incoming;
@@ -25,12 +26,15 @@ use url::Url;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
+pub use crate::fragment::DataReader;
+pub use crate::protocol::coding::Data;
 use crate::protocol::{FrameDecoder, FrameEncoder};
 use crate::stream::MaybeTlsStream;
 use fragment::{FragmentReader, FragmentWriter};
 
 pub use error::Result;
 pub use error::WebSocketError;
+
 pub use fragment::Message;
 pub use protocol::frame::Frame;
 pub use proxy::{Proxy, open_tunnel};
@@ -159,9 +163,10 @@ pub async fn frame_connect(
     let (stream, response) = connect(url, proxy).await?;
     let (r, w) = tokio::io::split(stream);
     let decoder = FrameDecoder::default();
+
     let framed_read = FramedRead::new(r, decoder);
     let encoder = FrameEncoder;
-    let framed_write = tokio_util::codec::FramedWrite::new(w, encoder);
+    let framed_write = FramedWrite::new(w, encoder);
     Ok((framed_read, framed_write, response))
 }
 
@@ -267,7 +272,7 @@ impl ReadHalfStream {
 }
 
 impl Stream for ReadHalfStream {
-    type Item = Result<Message>;
+    type Item = Result<Either<Message, (Data, DataReader)>>;
 
     fn poll_next(
         self: Pin<&mut Self>,

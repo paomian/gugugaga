@@ -4,8 +4,13 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{
+    SinkExt, StreamExt,
+    future::{Either, join_all},
+};
+use gugugaga::Message;
 use gugugaga::fragment_connect;
+use log::warn;
 use tokio::time::interval;
 
 async fn run(
@@ -14,24 +19,36 @@ async fn run(
     send_cnt: Arc<AtomicU64>, // 新增：发送计数器
     message: Bytes,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let url = "ws://127.0.0.1:8080";
+    let url = "ws://localhost:8080";
     let (mut reader, mut writer, response) = fragment_connect(url, None).await?;
     println!("Connected with response: {:?}", response);
 
     tokio::spawn(async move {
         while let Some(msg) = reader.next().await {
             match msg {
-                Ok(message) => {
+                Ok(either) => {
                     cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    match &message {
-                        gugugaga::Message::Text(text) => {
-                            bytes
-                                .fetch_add(text.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    match either {
+                        Either::Left(message) => match message {
+                            Message::Text(text) => {
+                                bytes.fetch_add(
+                                    text.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            Message::Binary(bin) => {
+                                bytes.fetch_add(
+                                    bin.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            _ => {}
+                        },
+                        Either::Right(_) => {
+                            warn!(
+                                "Received fragmented message, which more than 10MB, Streaming Interface is ignored in this example."
+                            );
                         }
-                        gugugaga::Message::Binary(bin) => {
-                            bytes.fetch_add(bin.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        _ => {}
                     }
                 }
                 Err(e) => {
@@ -87,24 +104,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    for i in 0..20 {
+    let mut tasks = Vec::new();
+    for i in 0..50 {
         println!("Starting client {}", i);
         let cnt = cnt.clone();
         let bytes = bytes.clone();
         let send_cnt = send_cnt.clone();
         // let message_20b = message_20b.clone();
         let message_16384b = message_16384b.clone();
-        tokio::spawn({
-            async move {
-                if let Err(e) = run(cnt, bytes, send_cnt, message_16384b).await {
-                    eprintln!("Client {} error: {}", i, e);
-                }
+        let task = async move {
+            if let Err(e) = run(cnt, bytes, send_cnt, message_16384b).await {
+                eprintln!("Client {} error: {}", i, e);
             }
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        tasks.push(tokio::spawn(task));
     }
 
-    loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-    }
+    join_all(tasks).await;
+    Ok(())
 }

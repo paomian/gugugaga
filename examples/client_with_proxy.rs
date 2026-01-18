@@ -4,9 +4,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, future::Either};
 use gugugaga::Message;
 use gugugaga::fragment_connect_with_proxy;
+use log::warn;
 use tokio::time::interval;
 
 async fn run(
@@ -22,31 +23,43 @@ async fn run(
     tokio::spawn(async move {
         while let Some(msg) = reader.next().await {
             match msg {
-                Ok(message) => {
+                Ok(either) => {
                     cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    match &message {
-                        Message::Text(text) => {
-                            println!("Received text message: {}", text);
-                            bytes
-                                .fetch_add(text.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        Message::Binary(bin) => {
-                            println!("Received binary message: {:x?}", bin);
-                            bytes.fetch_add(bin.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        Message::Ping(payload) => {
-                            println!("Received ping with payload: {:x?}", payload);
-                        }
-                        Message::Pong(payload) => {
-                            println!("Received pong with payload: {:x?}", payload);
-                        }
-                        Message::Close(code, reason) => {
-                            println!(
-                                "Received close message: code={:?}, reason={:?}",
-                                code, reason
+                    match either {
+                        Either::Left(message) => match message {
+                            Message::Text(text) => {
+                                println!("Received text message: {}", text);
+                                bytes.fetch_add(
+                                    text.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            Message::Binary(bin) => {
+                                println!("Received binary message: {:x?}", bin);
+                                bytes.fetch_add(
+                                    bin.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            Message::Ping(payload) => {
+                                println!("Received ping with payload: {:x?}", payload);
+                            }
+                            Message::Pong(payload) => {
+                                println!("Received pong with payload: {:x?}", payload);
+                            }
+                            Message::Close(code, reason) => {
+                                println!(
+                                    "Received close message: code={:?}, reason={:?}",
+                                    code, reason
+                                );
+                            }
+                            _ => {}
+                        },
+                        Either::Right(_) => {
+                            warn!(
+                                "Received fragmented message, which more than 10MB, Streaming Interface is ignored in this example."
                             );
                         }
-                        Message::Frame(_) => unimplemented!(),
                     }
                 }
                 Err(e) => {

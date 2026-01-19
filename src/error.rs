@@ -62,6 +62,8 @@ pub enum WebSocketError {
     UrlParse(#[from] url::ParseError),
     #[error("masked frame received from server")]
     MaskedFrameFromServer,
+    #[error("tokio timeout elapsed")]
+    Elapsed(#[from] tokio::time::error::Elapsed),
 }
 
 pub type Result<T> = std::result::Result<T, WebSocketError>;

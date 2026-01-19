@@ -1,3 +1,4 @@
+mod config;
 mod error;
 mod fragment;
 mod handshake;
@@ -16,9 +17,11 @@ use hyper::upgrade::Upgraded;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 use std::pin::Pin;
 use std::str::FromStr;
+use std::time::Duration;
 
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -26,6 +29,7 @@ use url::Url;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
+use crate::config::GuguGagaConfig;
 pub use crate::fragment::DataReader;
 pub use crate::protocol::coding::Data;
 use crate::protocol::{FrameDecoder, FrameEncoder};
@@ -126,6 +130,7 @@ where
 pub async fn connect(
     url: &str,
     proxy: Option<Proxy>,
+    config: &GuguGagaConfig,
 ) -> Result<(TokioIo<Upgraded>, Response<Incoming>)> {
     let url = Url::parse(url)?;
     let mut domain = url
@@ -141,11 +146,16 @@ pub async fn connect(
     let req = req(domain, port, url.scheme(), url.path())?;
     let socket = match proxy {
         Some(proxy) => {
-            let stream = open_tunnel(domain, port, proxy, true).await?;
+            let stream = open_tunnel(domain, port, proxy, true, config).await?;
             MaybeTlsStream::new(stream, url.scheme(), domain).await?
         }
         None => {
-            let stream = Box::new(TcpStream::connect((domain, port)).await?) as _;
+            let stream = timeout(
+                Duration::from_secs(config.tcp_timeout_secs),
+                TcpStream::connect((domain, port)),
+            )
+            .await??;
+            let stream = Box::new(stream) as _;
             MaybeTlsStream::new(stream, url.scheme(), domain).await?
         }
     };
@@ -155,26 +165,28 @@ pub async fn connect(
 pub async fn frame_connect(
     url: &str,
     proxy: Option<Proxy>,
+    config: GuguGagaConfig,
 ) -> Result<(
     FramedRead<ReadHalf<TokioIo<Upgraded>>, FrameDecoder>,
     FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>,
     Response<Incoming>,
 )> {
-    let (stream, response) = connect(url, proxy).await?;
+    let (stream, response) = connect(url, proxy, &config).await?;
     let (r, w) = tokio::io::split(stream);
     let decoder = FrameDecoder::default();
 
-    let framed_read = FramedRead::new(r, decoder);
+    let framed_read = FramedRead::with_capacity(r, decoder, config.max_frame_size);
     let encoder = FrameEncoder;
-    let framed_write = FramedWrite::new(w, encoder);
+    let framed_write = FramedWrite::with_capacity(w, encoder, config.max_frame_size);
     Ok((framed_read, framed_write, response))
 }
 
 pub async fn fragment_connect(
     url: &str,
     proxy: Option<Proxy>,
+    config: GuguGagaConfig,
 ) -> Result<(ReadHalfStream, WriteHalfSink, Response<Incoming>)> {
-    let (framed_read, framed_write, response) = frame_connect(url, proxy).await?;
+    let (framed_read, framed_write, response) = frame_connect(url, proxy, config).await?;
 
     let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
     let fragmented_read = FragmentReader::new(framed_read, control_tx);
@@ -185,9 +197,10 @@ pub async fn fragment_connect(
 pub async fn fragment_connect_with_proxy(
     url: &str,
     proxy_url: &str,
+    config: GuguGagaConfig,
 ) -> Result<(ReadHalfStream, WriteHalfSink, Response<Incoming>)> {
     let proxy = Proxy::from_str(proxy_url)?;
-    let (framed_read, framed_write, response) = frame_connect(url, Some(proxy)).await?;
+    let (framed_read, framed_write, response) = frame_connect(url, Some(proxy), config).await?;
     let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
     let fragmented_read = FragmentReader::new(framed_read, control_tx);
     let fragmented_write = FragmentWriter::new(framed_write, control_rx);

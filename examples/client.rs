@@ -20,7 +20,8 @@ async fn run(
     message: Bytes,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = "ws://localhost:8080";
-    let (mut reader, mut writer, response) = fragment_connect(url, None).await?;
+    let (mut reader, mut writer, response) =
+        fragment_connect(url, None, Default::default()).await?;
     println!("Connected with response: {:?}", response);
 
     tokio::spawn(async move {

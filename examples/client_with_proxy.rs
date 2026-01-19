@@ -18,7 +18,7 @@ async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
     let (mut reader, mut writer, response) =
-        fragment_connect_with_proxy(url, "socks5h://127.0.0.1:7890").await?;
+        fragment_connect_with_proxy(url, "socks5h://127.0.0.1:7890", Default::default()).await?;
     println!("Connected with response: {:?}", response);
     tokio::spawn(async move {
         while let Some(msg) = reader.next().await {

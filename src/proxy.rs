@@ -1,14 +1,17 @@
 use std::convert::TryFrom;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{fmt, net::IpAddr};
 
 use rustls::ClientConfig;
+use tokio::time::timeout;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
 
+use crate::config::GuguGagaConfig;
 use crate::error::{Result, WebSocketError};
 use base64::Engine;
 use url::Url;
@@ -60,6 +63,7 @@ pub async fn open_tunnel(
     port: u16,
     proxy: Proxy,
     disable_nagle: bool,
+    config: &GuguGagaConfig,
 ) -> Result<BoxedStream> {
     let scheme = proxy.url.scheme();
     let proxy_host = proxy
@@ -71,7 +75,11 @@ pub async fn open_tunnel(
 
     match scheme {
         "http" => {
-            let socket = TcpStream::connect((proxy_host, proxy_port)).await?;
+            let socket = timeout(
+                Duration::from_secs(config.tcp_timeout_secs),
+                TcpStream::connect((proxy_host, proxy_port)),
+            )
+            .await??;
             if disable_nagle {
                 socket.set_nodelay(true)?;
             }
@@ -80,7 +88,11 @@ pub async fn open_tunnel(
             Ok(Box::new(stream) as BoxedStream)
         }
         "https" => {
-            let tcp = TcpStream::connect((proxy_host, proxy_port)).await?;
+            let tcp = timeout(
+                Duration::from_secs(config.tcp_timeout_secs),
+                TcpStream::connect((proxy_host, proxy_port)),
+            )
+            .await??;
             if disable_nagle {
                 tcp.set_nodelay(true)?;
             }
@@ -91,7 +103,11 @@ pub async fn open_tunnel(
             Ok(stream)
         }
         "socks4" => {
-            let tcp = TcpStream::connect((proxy_host, proxy_port)).await?;
+            let tcp = timeout(
+                Duration::from_secs(config.tcp_timeout_secs),
+                TcpStream::connect((proxy_host, proxy_port)),
+            )
+            .await??;
             if disable_nagle {
                 tcp.set_nodelay(true)?;
             }
@@ -100,7 +116,11 @@ pub async fn open_tunnel(
             Ok(Box::new(stream) as BoxedStream)
         }
         "socks4a" => {
-            let tcp = TcpStream::connect((proxy_host, proxy_port)).await?;
+            let tcp = timeout(
+                Duration::from_secs(config.tcp_timeout_secs),
+                TcpStream::connect((proxy_host, proxy_port)),
+            )
+            .await??;
             if disable_nagle {
                 tcp.set_nodelay(true)?;
             }
@@ -109,7 +129,11 @@ pub async fn open_tunnel(
             Ok(Box::new(stream) as BoxedStream)
         }
         "socks5" => {
-            let tcp = TcpStream::connect((proxy_host, proxy_port)).await?;
+            let tcp = timeout(
+                Duration::from_secs(config.tcp_timeout_secs),
+                TcpStream::connect((proxy_host, proxy_port)),
+            )
+            .await??;
             if disable_nagle {
                 tcp.set_nodelay(true)?;
             }
@@ -118,7 +142,11 @@ pub async fn open_tunnel(
             Ok(Box::new(stream) as BoxedStream)
         }
         "socks5h" => {
-            let tcp = TcpStream::connect((proxy_host, proxy_port)).await?;
+            let tcp = timeout(
+                Duration::from_secs(config.tcp_timeout_secs),
+                TcpStream::connect((proxy_host, proxy_port)),
+            )
+            .await??;
             if disable_nagle {
                 tcp.set_nodelay(true)?;
             }

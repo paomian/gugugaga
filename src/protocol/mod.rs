@@ -1,5 +1,5 @@
 use crate::error::WebSocketError;
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::protocol::frame::FrameHeader;
@@ -28,9 +28,17 @@ pub struct FrameDecoder {
     masked: bool,
     payload_len: Option<usize>,
     masking_key: Option<[u8; 4]>,
+    max_frame_size: usize,
 }
 
 impl FrameDecoder {
+    pub fn new(max_frame_size: usize) -> Self {
+        Self {
+            max_frame_size,
+            ..Self::default()
+        }
+    }
+
     pub fn reset(&mut self) {
         self.state = FrameDecoderReadingState::Header;
         self.is_final = false;
@@ -60,6 +68,7 @@ impl Default for FrameDecoder {
             masked: false,
             payload_len: None,
             masking_key: None,
+            max_frame_size: crate::config::GuguGagaConfig::default().max_frame_size,
         }
     }
 }
@@ -115,10 +124,19 @@ impl Decoder for FrameDecoder {
                         }
                         8 => {
                             let len = src.get_u64();
-                            len as usize
+                            if len & (1 << 63) != 0 {
+                                return Err(WebSocketError::InvalidValue);
+                            }
+                            usize::try_from(len).map_err(|_| WebSocketError::InvalidValue)?
                         }
                         _ => self.length_code as usize,
                     };
+                    if payload_len > self.max_frame_size {
+                        return Err(WebSocketError::FrameTooLarge {
+                            size: payload_len,
+                            max: self.max_frame_size,
+                        });
+                    }
                     self.state = FrameDecoderReadingState::MaskingKey;
                     self.payload_len = Some(payload_len);
                 }
@@ -132,6 +150,11 @@ impl Decoder for FrameDecoder {
                     } else {
                         None
                     };
+                    let payload_len = self.payload_len.unwrap_or(0);
+                    if src.len() < payload_len {
+                        // Reserve once per frame, after validating its advertised length.
+                        src.reserve(payload_len - src.len());
+                    }
                     self.state = FrameDecoderReadingState::Payload;
                     self.masking_key = masking_key;
                 }
@@ -140,7 +163,7 @@ impl Decoder for FrameDecoder {
                     if src.remaining() < payload_len {
                         return Ok(None);
                     }
-                    let mut payload = src.split_to(payload_len).to_vec();
+                    let mut payload = src.split_to(payload_len);
                     if let Some(mask) = self.masking_key {
                         mask::apply_mask(&mut payload, mask);
                     }
@@ -153,7 +176,7 @@ impl Decoder for FrameDecoder {
                             opcode: self.opcode,
                             mask: self.masking_key,
                         },
-                        payload.into(),
+                        payload.freeze(),
                     );
                     // Reset state for next frame
                     self.state = FrameDecoderReadingState::Header;
@@ -170,9 +193,7 @@ impl Encoder<frame::Frame> for FrameEncoder {
     type Error = WebSocketError;
 
     fn encode(&mut self, item: frame::Frame, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        let mut writer = dst.writer();
-        item.format(&mut writer)?;
-        Ok(())
+        item.format_into_bytes_mut(dst)
     }
 }
 
@@ -181,6 +202,101 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+
+    #[test]
+    fn encode_matches_wire_format_without_mutating_shared_payload() {
+        for size in [0, 1, 125, 126, 65535, 65536, 1024 * 1024] {
+            for mask in [None, Some([0x12, 0x34, 0x56, 0x78])] {
+                let shared = Bytes::from(vec![0x5a; size]);
+                let frame = frame::Frame::from_payload(
+                    FrameHeader {
+                        opcode: coding::OpCode::Data(coding::Data::Binary),
+                        mask,
+                        ..Default::default()
+                    },
+                    shared.clone(),
+                );
+                let mut expected = b"existing prefix".to_vec();
+                frame.clone().format(&mut expected).unwrap();
+                let mut actual = bytes::BytesMut::from(&b"existing prefix"[..]);
+                FrameEncoder.encode(frame, &mut actual).unwrap();
+                assert_eq!(&actual[..], expected);
+                assert!(shared.iter().all(|&b| b == 0x5a));
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_payload_survives_following_frames_and_buffer_reuse() {
+        let mut wire = Vec::new();
+        for payload in [b"first payload".as_slice(), b"second".as_slice()] {
+            frame::Frame::from_payload(
+                FrameHeader {
+                    opcode: coding::OpCode::Data(coding::Data::Binary),
+                    mask: Some([1, 2, 3, 4]),
+                    ..Default::default()
+                },
+                Bytes::copy_from_slice(payload),
+            )
+            .format(&mut wire)
+            .unwrap();
+        }
+        let mut decoder = FrameDecoder::default();
+        let mut src = bytes::BytesMut::new();
+        let mut received = Vec::new();
+        // Exercise headers and payloads split across arbitrary TCP reads.
+        for byte in wire {
+            src.extend_from_slice(&[byte]);
+            if let Some(frame) = decoder.decode(&mut src).unwrap() {
+                received.push(frame.into_payload());
+            }
+        }
+        src.extend_from_slice(&vec![0xff; 65536]);
+        assert_eq!(&received[0][..], b"first payload");
+        assert_eq!(&received[1][..], b"second");
+    }
+
+    #[test]
+    fn oversized_or_invalid_lengths_fail_before_reservation() {
+        let mut decoder = FrameDecoder::new(512);
+        decoder.reset();
+        let mut src = bytes::BytesMut::from(&[0x82, 126, 0x02, 0x01][..]);
+        let capacity = src.capacity();
+        assert!(matches!(
+            decoder.decode(&mut src),
+            Err(WebSocketError::FrameTooLarge {
+                size: 513,
+                max: 512
+            })
+        ));
+        assert!(src.capacity() <= capacity);
+        let mut decoder = FrameDecoder::default();
+        let mut src = bytes::BytesMut::from(&[0x82, 127, 0x80, 0, 0, 0, 0, 0, 0, 0][..]);
+        let capacity = src.capacity();
+        assert!(matches!(
+            decoder.decode(&mut src),
+            Err(WebSocketError::InvalidValue)
+        ));
+        assert!(src.capacity() <= capacity);
+    }
+
+    #[test]
+    fn reserves_complete_payload_once_and_accepts_exact_limit() {
+        let size = 1024 * 1024;
+        let mut decoder = FrameDecoder::new(size);
+        let mut src = bytes::BytesMut::from(&[0x82, 127][..]);
+        src.extend_from_slice(&(size as u64).to_be_bytes());
+        assert!(decoder.decode(&mut src).unwrap().is_none());
+        assert!(src.capacity() >= size);
+        let capacity = src.capacity();
+        src.extend_from_slice(&[0x5a; 1024]);
+        assert!(decoder.decode(&mut src).unwrap().is_none());
+        assert_eq!(src.capacity(), capacity);
+        src.resize(size, 0x5a);
+        let frame = decoder.decode(&mut src).unwrap().unwrap();
+        assert_eq!(frame.payload().len(), size);
+        assert!(frame.payload().iter().all(|&byte| byte == 0x5a));
+    }
 
     #[tokio::test]
     async fn test_frame_encoder_decoder() {

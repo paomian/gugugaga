@@ -37,7 +37,7 @@ impl std::ops::Deref for Utf8Bytes {
     /// /// Example fn that takes a str slice
     /// fn a(s: &str) {}
     ///
-    /// let data = tungstenite::Utf8Bytes::from_static("foo123");
+    /// let data = gugugaga::Utf8Bytes::from_static("foo123");
     ///
     /// // auto-deref as arg
     /// a(&data);
@@ -101,7 +101,7 @@ where
     for<'a> &'a str: PartialEq<T>,
 {
     /// ```
-    /// let payload = tungstenite::Utf8Bytes::from_static("foo123");
+    /// let payload = gugugaga::Utf8Bytes::from_static("foo123");
     /// assert_eq!(payload, "foo123");
     /// assert_eq!(payload, "foo123".to_string());
     /// assert_eq!(payload, &"foo123".to_string());

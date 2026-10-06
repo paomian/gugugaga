@@ -41,47 +41,14 @@ use crate::error::WebSocketError;
 ///
 /// # Example
 ///
-/// ```
-/// use fastwebsockets::handshake;
-/// use fastwebsockets::WebSocket;
-/// use hyper::{Request, body::Bytes, upgrade::Upgraded, header::{UPGRADE, CONNECTION}};
-/// use hyper_util::rt::TokioIo;
-/// use http_body_util::Empty;
-/// use tokio::net::TcpStream;
-/// use std::future::Future;
-/// use anyhow::Result;
+/// The public connection API builds the request and invokes this handshake:
 ///
-/// async fn connect() -> Result<WebSocket<TokioIo<Upgraded>>> {
-///   let stream = TcpStream::connect("localhost:9001").await?;
-///
-///   let req = Request::builder()
-///     .method("GET")
-///     .uri("http://localhost:9001/")
-///     .header("Host", "localhost:9001")
-///     .header(UPGRADE, "websocket")
-///     .header(CONNECTION, "upgrade")
-///     .header(
-///       "Sec-WebSocket-Key",
-///       fastwebsockets::handshake::generate_key(),
-///     )
-///     .header("Sec-WebSocket-Version", "13")
-///     .body(Empty::<Bytes>::new())?;
-///
-///   let (ws, _) = handshake::client(&SpawnExecutor, req, stream).await?;
-///   Ok(ws)
-/// }
-///
-/// // Tie hyper's executor to tokio runtime
-/// struct SpawnExecutor;
-///
-/// impl<Fut> hyper::rt::Executor<Fut> for SpawnExecutor
-/// where
-///   Fut: Future + Send + 'static,
-///   Fut::Output: Send + 'static,
-/// {
-///   fn execute(&self, fut: Fut) {
-///     tokio::task::spawn(fut);
-///   }
+/// ```no_run
+/// async fn connect() -> gugugaga::Result<()> {
+///     let config = gugugaga::GuguGagaConfig::default();
+///     let (_stream, _response) =
+///         gugugaga::connect("ws://localhost:9001/", None, &config).await?;
+///     Ok(())
 /// }
 /// ```
 pub async fn client<S, E, B>(

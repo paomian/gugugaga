@@ -16,7 +16,7 @@ use super::{
     mask::{apply_mask, generate_mask},
 };
 use crate::error::Result;
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 /// A struct representing the close command.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CloseFrame {
@@ -372,6 +372,23 @@ impl Frame {
             output.write_all(&self.payload)?;
         }
 
+        Ok(())
+    }
+
+    /// Encode directly into the transport buffer, masking only the appended payload.
+    pub(crate) fn format_into_bytes_mut(self, buf: &mut BytesMut) -> Result<()> {
+        buf.reserve(self.len());
+        self.header
+            .format(self.payload.len() as u64, &mut (&mut *buf).writer())?;
+        if let Some(mask) = self.header.mask.filter(|_| self.payload.len() >= 128) {
+            super::mask::extend_masked(buf, &self.payload, mask);
+        } else {
+            let payload_start = buf.len();
+            buf.extend_from_slice(&self.payload);
+            if let Some(mask) = self.header.mask {
+                apply_mask(&mut buf[payload_start..], mask);
+            }
+        }
         Ok(())
     }
 

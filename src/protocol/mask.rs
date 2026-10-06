@@ -41,9 +41,77 @@ pub fn apply_mask_fast32(buf: &mut [u8], mask: [u8; 4]) {
     apply_mask_fallback(suffix, mask_u32.to_ne_bytes());
 }
 
+/// Append a masked payload in one pass without modifying its shared source.
+#[inline]
+pub(crate) fn extend_masked(buf: &mut bytes::BytesMut, payload: &[u8], mask: [u8; 4]) {
+    buf.reserve(payload.len());
+    let old_len = buf.len();
+    let word_mask = u64::from_ne_bytes([
+        mask[0], mask[1], mask[2], mask[3], mask[0], mask[1], mask[2], mask[3],
+    ]);
+    {
+        let mut source = payload.chunks_exact(8);
+        let mut target = buf.spare_capacity_mut()[..payload.len()].chunks_exact_mut(8);
+        for (src, dst) in source.by_ref().zip(target.by_ref()) {
+            let word = u64::from_ne_bytes(src.try_into().unwrap()) ^ word_mask;
+            // SAFETY: dst contains eight writable spare bytes. Unaligned writes are
+            // supported, and all eight bytes are initialized before exposing them.
+            unsafe { std::ptr::write_unaligned(dst.as_mut_ptr().cast::<u64>(), word) };
+        }
+        // Every complete block is a multiple of the four-byte mask period.
+        for (index, (src, dst)) in source
+            .remainder()
+            .iter()
+            .zip(target.into_remainder())
+            .enumerate()
+        {
+            dst.write(*src ^ mask[index & 3]);
+        }
+    }
+    // SAFETY: reserve ensured sufficient capacity, and the loops initialized
+    // exactly payload.len() new bytes. Existing bytes were left untouched.
+    unsafe { buf.set_len(old_len + payload.len()) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masked_append_matches_reference_for_alignments_and_tails() {
+        use bytes::BytesMut;
+        for size in (0usize..=33).chain([
+            63, 64, 65, 125, 126, 127, 255, 256, 257, 65535, 65536, 1048576,
+        ]) {
+            let payload: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(17) + 13) as u8).collect();
+            for mask in [[0; 4], [1, 2, 3, 4], [0x6d, 0xb6, 0xb2, 0x80]] {
+                let mut reference = payload.clone();
+                apply_mask_fallback(&mut reference, mask);
+                for prefix in 0..16 {
+                    let mut out = BytesMut::with_capacity(prefix + size);
+                    out.extend_from_slice(&vec![0xa5; prefix]);
+                    extend_masked(&mut out, &payload, mask);
+                    assert_eq!(&out[..prefix], &vec![0xa5; prefix]);
+                    assert_eq!(&out[prefix..], &reference);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn masked_append_preserves_source_sharing_the_allocation() {
+        use bytes::BytesMut;
+        let mut out = BytesMut::with_capacity(1024);
+        out.extend_from_slice(&[0x5a; 256]);
+        let payload = out.split_to(128).freeze();
+        let prefix = out.to_vec();
+        extend_masked(&mut out, &payload, [1, 2, 3, 4]);
+        assert!(payload.iter().all(|&byte| byte == 0x5a));
+        assert_eq!(&out[..128], &prefix);
+        let mut reference = payload.to_vec();
+        apply_mask_fallback(&mut reference, [1, 2, 3, 4]);
+        assert_eq!(&out[128..], &reference);
+    }
 
     #[test]
     fn test_apply_mask() {

@@ -28,12 +28,18 @@ pub enum Message {
 
 impl From<Message> for Vec<Frame> {
     fn from(msg: Message) -> Self {
-        match msg {
+        msg.into_frames(crate::config::GuguGagaConfig::default().send_frame_size)
+    }
+}
+
+impl Message {
+    fn into_frames(self, frame_size: usize) -> Vec<Frame> {
+        match self {
             Message::Frame(frame) => vec![frame],
             Message::Text(text) => {
-                Frame::split_frame(text.into(), OpCode::Data(Data::Text), 1024 * 512)
+                Frame::split_frame(text.into(), OpCode::Data(Data::Text), frame_size)
             }
-            Message::Binary(bin) => Frame::split_frame(bin, OpCode::Data(Data::Binary), 1024 * 512),
+            Message::Binary(bin) => Frame::split_frame(bin, OpCode::Data(Data::Binary), frame_size),
             Message::Ping(payload) => vec![Frame::ping(payload)],
             Message::Pong(payload) => vec![Frame::pong(payload)],
             Message::Close(code, reason) => {
@@ -240,12 +246,16 @@ where
                                                 )));
                                             }
                                             if fin {
+                                                let payload = frame.into_payload();
+                                                let message = match data_type {
+                                                    Data::Text => {
+                                                        Message::Text(payload.try_into()?)
+                                                    }
+                                                    Data::Binary => Message::Binary(payload),
+                                                    _ => unreachable!(),
+                                                };
                                                 return Poll::Ready(Some(Ok(Either::Left(
-                                                    assemble_message(data_type, {
-                                                        let mut parts = VecDeque::new();
-                                                        parts.push_back(frame.into_payload());
-                                                        parts
-                                                    })?,
+                                                    message,
                                                 ))));
                                             } else {
                                                 let payload = frame.into_payload();
@@ -299,6 +309,7 @@ where
     inner: T,
     pending_frames: VecDeque<Frame>,
     control_rx: Receiver<Message>,
+    frame_size: usize,
 }
 
 impl<T> FragmentWriter<T>
@@ -310,27 +321,47 @@ where
             inner,
             pending_frames: VecDeque::new(),
             control_rx,
+            frame_size: crate::config::GuguGagaConfig::default().send_frame_size,
         }
+    }
+
+    pub fn with_frame_size(
+        inner: T,
+        control_rx: Receiver<Message>,
+        frame_size: usize,
+    ) -> Result<Self> {
+        if frame_size == 0 {
+            return Err(WebSocketError::InvalidValue);
+        }
+        Ok(Self {
+            inner,
+            pending_frames: VecDeque::new(),
+            control_rx,
+            frame_size,
+        })
     }
 
     fn poll_flush_pending(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let mut this = self.project();
 
         while let Poll::Ready(Some(msg)) = this.control_rx.poll_recv(cx) {
-            match msg {
-                Message::Pong(payload) => this.pending_frames.push_back(Frame::pong(payload)),
+            let mut frame = match msg {
+                Message::Pong(payload) => Frame::pong(payload),
                 Message::Close(code, reason) => {
-                    this.pending_frames
-                        .push_back(Frame::close(reason.map(|r| CloseFrame { code, reason: r })));
+                    Frame::close(reason.map(|r| CloseFrame { code, reason: r }))
                 }
                 _ => {
                     warn!("Unexpected message in control channel: {:?}", msg);
+                    continue;
                 }
-            }
+            };
+            frame.set_random_mask();
+            this.pending_frames.push_back(frame);
         }
 
-        while let Some(frame) = this.pending_frames.pop_front() {
+        while !this.pending_frames.is_empty() {
             ready!(this.inner.as_mut().poll_ready(cx))?;
+            let frame = this.pending_frames.pop_front().unwrap();
             this.inner.as_mut().start_send(frame)?;
         }
 
@@ -350,8 +381,26 @@ where
     }
 
     fn start_send(self: Pin<&mut Self>, item: Message) -> Result<()> {
-        let pending_frames = self.project().pending_frames;
-        let frames: Vec<Frame> = item.into();
+        let this = self.project();
+        let pending_frames = this.pending_frames;
+        let frame_size = *this.frame_size;
+        // The common case does not need an intermediate Vec of frames.
+        let item = match item {
+            Message::Binary(data) if data.len() <= frame_size => {
+                let mut frame = Frame::message(data, OpCode::Data(Data::Binary), true);
+                frame.set_random_mask();
+                pending_frames.push_back(frame);
+                return Ok(());
+            }
+            Message::Text(text) if text.len() <= frame_size => {
+                let mut frame = Frame::message(text, OpCode::Data(Data::Text), true);
+                frame.set_random_mask();
+                pending_frames.push_back(frame);
+                return Ok(());
+            }
+            item => item,
+        };
+        let frames = item.into_frames(frame_size);
         for mut frame in frames {
             frame.set_random_mask();
             pending_frames.push_back(frame);
@@ -378,6 +427,142 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct StallingSink {
+        polls: usize,
+        frames: Vec<Frame>,
+    }
+
+    impl Sink<Frame> for StallingSink {
+        type Error = WebSocketError;
+        fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+            self.polls += 1;
+            if self.polls == 2 {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        fn start_send(mut self: Pin<&mut Self>, frame: Frame) -> Result<()> {
+            self.frames.push(frame);
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_readiness_preserves_all_fragments() {
+        use futures_util::SinkExt;
+        let (_tx, rx) = tokio::sync::mpsc::channel(2);
+        let mut writer =
+            FragmentWriter::with_frame_size(StallingSink::default(), rx, 512 * 1024).unwrap();
+        let payload = Bytes::from(vec![0x5a; 600 * 1024]);
+        writer.send(Message::Binary(payload.clone())).await.unwrap();
+        assert_eq!(writer.inner.frames.len(), 2);
+        let received: Vec<u8> = writer
+            .inner
+            .frames
+            .iter()
+            .flat_map(|f| f.payload().iter().copied())
+            .collect();
+        assert_eq!(received, payload);
+        assert!(writer.inner.frames.iter().all(|f| f.is_masked()));
+    }
+
+    #[tokio::test]
+    async fn default_writer_keeps_large_messages_in_one_frame() {
+        use futures_util::SinkExt;
+        for text in [false, true] {
+            let (_tx, rx) = tokio::sync::mpsc::channel(2);
+            let mut writer = FragmentWriter::new(StallingSink::default(), rx);
+            let payload = Bytes::from(vec![b'a'; 1024 * 1024]);
+            let message = if text {
+                Message::Text(payload.clone().try_into().unwrap())
+            } else {
+                Message::Binary(payload.clone())
+            };
+            writer.send(message).await.unwrap();
+            assert_eq!(writer.inner.frames.len(), 1);
+            let frame = &writer.inner.frames[0];
+            assert!(frame.header().is_final);
+            assert!(frame.is_masked());
+            assert_eq!(frame.payload(), payload);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_fragmentation_handles_boundaries_and_text() {
+        use futures_util::SinkExt;
+        for text in [false, true] {
+            for size in [0, 1, 6, 7, 8, 14, 15] {
+                let (_tx, rx) = tokio::sync::mpsc::channel(2);
+                let mut writer =
+                    FragmentWriter::with_frame_size(StallingSink::default(), rx, 7).unwrap();
+                let payload = Bytes::from(vec![b'a'; size]);
+                let message = if text {
+                    Message::Text(payload.clone().try_into().unwrap())
+                } else {
+                    Message::Binary(payload.clone())
+                };
+                writer.send(message).await.unwrap();
+                assert_eq!(writer.inner.frames.len(), size.div_ceil(7).max(1));
+                let mut combined = Vec::new();
+                for (index, frame) in writer.inner.frames.iter().enumerate() {
+                    assert!(frame.payload().len() <= 7);
+                    assert!(frame.is_masked());
+                    assert_eq!(
+                        frame.header().is_final,
+                        index + 1 == writer.inner.frames.len()
+                    );
+                    let opcode = if index > 0 {
+                        Data::Continue
+                    } else if text {
+                        Data::Text
+                    } else {
+                        Data::Binary
+                    };
+                    assert_eq!(frame.header().opcode, OpCode::Data(opcode));
+                    combined.extend_from_slice(frame.payload());
+                }
+                assert_eq!(combined, payload);
+            }
+        }
+        let (_tx, rx) = tokio::sync::mpsc::channel(2);
+        assert!(FragmentWriter::with_frame_size(StallingSink::default(), rx, 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn automatic_control_replies_are_masked() {
+        use futures_util::SinkExt;
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let mut writer = FragmentWriter::new(StallingSink::default(), rx);
+        tx.send(Message::Pong(Bytes::from_static(b"ping payload")))
+            .await
+            .unwrap();
+        tx.send(Message::Close(CloseCode::Normal, Some("bye".into())))
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+        assert_eq!(writer.inner.frames.len(), 2);
+        assert!(writer.inner.frames.iter().all(|f| f.is_masked()));
+        assert_eq!(writer.inner.frames[0].payload(), b"ping payload");
+        assert_eq!(
+            writer.inner.frames[1]
+                .clone()
+                .into_close()
+                .unwrap()
+                .unwrap()
+                .code,
+            CloseCode::Normal
+        );
+    }
     #[tokio::test]
     async fn test_small_message() {
         let msg = Message::Text("hello".into());
@@ -390,8 +575,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_message() {
-        // more than 512kb
-        let large_data = vec![0u8; 600 * 1024];
+        // More than the default 16 MiB outbound frame size.
+        let large_data = vec![0u8; 16 * 1024 * 1024 + 1];
         let msg = Message::Binary(Bytes::from(large_data.clone()));
         let frames: Vec<Frame> = msg.into();
         assert!(frames.len() > 1);

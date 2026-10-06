@@ -29,7 +29,7 @@ use url::Url;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
-use crate::config::GuguGagaConfig;
+pub use crate::config::GuguGagaConfig;
 pub use crate::fragment::DataReader;
 pub use crate::protocol::coding::Data;
 use crate::protocol::{FrameDecoder, FrameEncoder};
@@ -41,6 +41,7 @@ pub use error::WebSocketError;
 
 pub use fragment::Message;
 pub use protocol::frame::Frame;
+pub use protocol::utf8::Utf8Bytes;
 pub use proxy::{Proxy, open_tunnel};
 
 #[derive(Debug)]
@@ -171,13 +172,19 @@ pub async fn frame_connect(
     FramedWrite<WriteHalf<TokioIo<Upgraded>>, FrameEncoder>,
     Response<Incoming>,
 )> {
+    if config.max_frame_size == 0 {
+        return Err(WebSocketError::InvalidValue);
+    }
     let (stream, response) = connect(url, proxy, &config).await?;
     let (r, w) = tokio::io::split(stream);
-    let decoder = FrameDecoder::default();
+    let decoder = FrameDecoder::new(config.max_frame_size);
 
-    let framed_read = FramedRead::with_capacity(r, decoder, config.max_frame_size);
+    // Initial capacity is independent of the protocol's maximum frame size.
+    // FramedRead/FramedWrite grow as needed for larger messages.
+    let initial_capacity = config.max_frame_size.min(64 * 1024);
+    let framed_read = FramedRead::with_capacity(r, decoder, initial_capacity);
     let encoder = FrameEncoder;
-    let framed_write = FramedWrite::with_capacity(w, encoder, config.max_frame_size);
+    let framed_write = FramedWrite::with_capacity(w, encoder, initial_capacity);
     Ok((framed_read, framed_write, response))
 }
 
@@ -186,11 +193,13 @@ pub async fn fragment_connect(
     proxy: Option<Proxy>,
     config: GuguGagaConfig,
 ) -> Result<(ReadHalfStream, WriteHalfSink, Response<Incoming>)> {
+    let send_frame_size = config.outbound_frame_size()?;
     let (framed_read, framed_write, response) = frame_connect(url, proxy, config).await?;
 
     let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
     let fragmented_read = FragmentReader::new(framed_read, control_tx);
-    let fragmented_write = FragmentWriter::new(framed_write, control_rx);
+    let fragmented_write =
+        FragmentWriter::with_frame_size(framed_write, control_rx, send_frame_size)?;
     Ok((fragmented_read.into(), fragmented_write.into(), response))
 }
 
@@ -199,11 +208,13 @@ pub async fn fragment_connect_with_proxy(
     proxy_url: &str,
     config: GuguGagaConfig,
 ) -> Result<(ReadHalfStream, WriteHalfSink, Response<Incoming>)> {
+    let send_frame_size = config.outbound_frame_size()?;
     let proxy = Proxy::from_str(proxy_url)?;
     let (framed_read, framed_write, response) = frame_connect(url, Some(proxy), config).await?;
     let (control_tx, control_rx) = tokio::sync::mpsc::channel::<Message>(200);
     let fragmented_read = FragmentReader::new(framed_read, control_tx);
-    let fragmented_write = FragmentWriter::new(framed_write, control_rx);
+    let fragmented_write =
+        FragmentWriter::with_frame_size(framed_write, control_rx, send_frame_size)?;
     Ok((fragmented_read.into(), fragmented_write.into(), response))
 }
 

@@ -36,6 +36,8 @@ pub enum WebSocketError {
     InvalidUpgradeHeader,
     #[error("invalid Connection header")]
     InvalidConnectionHeader,
+    #[error("frame payload too large: {size} bytes exceeds {max} bytes")]
+    FrameTooLarge { size: usize, max: usize },
     #[error("invalid value")]
     InvalidValue,
     #[error("invalid UTF-8 sequence")]
